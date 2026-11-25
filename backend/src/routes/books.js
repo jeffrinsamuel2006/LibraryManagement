@@ -1,43 +1,9 @@
 import { Router } from 'express';
-import Book from '../models/Book.js';
-import Loan from '../models/Loan.js';
+import { readDB, updateDB, newId, now, byNewest } from '../storage/db.js';
 const router = Router();
-
-router.get('/', async (req, res, next) => {
-  try {
-    const q = req.query.search?.trim();
-    const filter = q ? { $or: ['title', 'author', 'category', 'isbn'].map(field => ({ [field]: { $regex: q, $options: 'i' } })) } : {};
-    res.json(await Book.find(filter).sort({ createdAt: -1 }));
-  } catch (e) { next(e); }
-});
-router.post('/', async (req, res, next) => {
-  try {
-    const { title, author, category, isbn, totalCopies } = req.body;
-    if (![title, author, category, isbn].every(v => v?.trim())) return res.status(400).json({ message: 'All book fields are required.' });
-    if (!Number.isInteger(Number(totalCopies)) || Number(totalCopies) < 1) return res.status(400).json({ message: 'Total copies must be a positive whole number.' });
-    const book = await Book.create({ title, author, category, isbn, totalCopies: Number(totalCopies), availableCopies: Number(totalCopies) });
-    res.status(201).json(book);
-  } catch (e) { if (e.code === 11000) return res.status(409).json({ message: 'ISBN already exists.' }); next(e); }
-});
-router.put('/:id', async (req, res, next) => {
-  try {
-    const book = await Book.findById(req.params.id);
-    if (!book) return res.status(404).json({ message: 'Book not found.' });
-    const { title, author, category, isbn, totalCopies } = req.body;
-    const issued = book.totalCopies - book.availableCopies;
-    const total = Number(totalCopies);
-    if (!title?.trim() || !author?.trim() || !category?.trim() || !isbn?.trim() || !Number.isInteger(total) || total < issued) return res.status(400).json({ message: 'Enter valid details. Total copies cannot be less than copies currently issued.' });
-    Object.assign(book, { title, author, category, isbn, totalCopies: total, availableCopies: total - issued });
-    await book.save(); res.json(book);
-  } catch (e) { if (e.code === 11000) return res.status(409).json({ message: 'ISBN already exists.' }); next(e); }
-});
-router.delete('/:id', async (req, res, next) => {
-  try {
-    const active = await Loan.exists({ book: req.params.id, status: 'Issued' });
-    if (active) return res.status(400).json({ message: 'Cannot delete a book while copies are issued.' });
-    const book = await Book.findByIdAndDelete(req.params.id);
-    if (!book) return res.status(404).json({ message: 'Book not found.' });
-    res.json({ message: 'Book deleted.' });
-  } catch (e) { next(e); }
-});
+const fieldsValid = b => [b.title,b.author,b.category,b.isbn].every(v => typeof v === 'string' && v.trim());
+router.get('/', async (req,res,next) => { try { const db=await readDB(); const q=(req.query.search||'').trim().toLowerCase(); res.json(byNewest(db.books.filter(b=>!q||[b.title,b.author,b.category,b.isbn].some(v=>v.toLowerCase().includes(q))))); } catch(e){next(e);} });
+router.post('/', async (req,res,next) => { try { const b=req.body; const total=Number(b.totalCopies); if(!fieldsValid(b)) return res.status(400).json({message:'All book fields are required.'}); if(!Number.isInteger(total)||total<1) return res.status(400).json({message:'Total copies must be a positive whole number.'}); const result=await updateDB(db=>{if(db.books.some(x=>x.isbn.toLowerCase()===b.isbn.trim().toLowerCase()))return null;const book={_id:newId(),title:b.title.trim(),author:b.author.trim(),category:b.category.trim(),isbn:b.isbn.trim(),totalCopies:total,availableCopies:total,createdAt:now()};db.books.push(book);return book;}); if(!result)return res.status(409).json({message:'ISBN already exists.'});res.status(201).json(result);}catch(e){next(e);} });
+router.put('/:id', async(req,res,next)=>{try{const b=req.body,total=Number(b.totalCopies);if(!fieldsValid(b)||!Number.isInteger(total)||total<1)return res.status(400).json({message:'Enter valid book details.'});const result=await updateDB(db=>{const book=db.books.find(x=>x._id===req.params.id);if(!book)return {error:404,message:'Book not found.'};const issued=book.totalCopies-book.availableCopies;if(total<issued)return {error:400,message:'Total copies cannot be less than copies currently issued.'};if(db.books.some(x=>x._id!==book._id&&x.isbn.toLowerCase()===b.isbn.trim().toLowerCase()))return {error:409,message:'ISBN already exists.'};Object.assign(book,{title:b.title.trim(),author:b.author.trim(),category:b.category.trim(),isbn:b.isbn.trim(),totalCopies:total,availableCopies:total-issued});return {book};});if(result.error)return res.status(result.error).json({message:result.message});res.json(result.book);}catch(e){next(e);}});
+router.delete('/:id',async(req,res,next)=>{try{const result=await updateDB(db=>{if(db.loans.some(l=>l.book===req.params.id&&l.status==='Issued'))return {error:400,message:'Cannot delete a book while copies are issued.'};const i=db.books.findIndex(b=>b._id===req.params.id);if(i<0)return {error:404,message:'Book not found.'};db.books.splice(i,1);return {ok:true};});if(result.error)return res.status(result.error).json({message:result.message});res.json({message:'Book deleted.'});}catch(e){next(e);}});
 export default router;

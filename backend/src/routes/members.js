@@ -1,36 +1,8 @@
 import { Router } from 'express';
-import Member from '../models/Member.js';
-import Loan from '../models/Loan.js';
-const router = Router();
-router.get('/', async (req, res, next) => {
-  try {
-    const q = req.query.search?.trim();
-    const filter = q ? { $or: ['name', 'email', 'phone', 'department'].map(field => ({ [field]: { $regex: q, $options: 'i' } })) } : {};
-    res.json(await Member.find(filter).sort({ createdAt: -1 }));
-  } catch (e) { next(e); }
-});
-router.post('/', async (req, res, next) => {
-  try {
-    const { name, email, phone, department } = req.body;
-    if (!name?.trim() || !/^\S+@\S+\.\S+$/.test(email || '') || !phone?.trim()) return res.status(400).json({ message: 'Enter a name, valid email and phone number.' });
-    res.status(201).json(await Member.create({ name, email, phone, department }));
-  } catch (e) { next(e); }
-});
-router.put('/:id', async (req, res, next) => {
-  try {
-    const { name, email, phone, department } = req.body;
-    if (!name?.trim() || !/^\S+@\S+\.\S+$/.test(email || '') || !phone?.trim()) return res.status(400).json({ message: 'Enter a name, valid email and phone number.' });
-    const member = await Member.findByIdAndUpdate(req.params.id, { name, email, phone, department }, { new: true, runValidators: true });
-    if (!member) return res.status(404).json({ message: 'Member not found.' });
-    res.json(member);
-  } catch (e) { next(e); }
-});
-router.delete('/:id', async (req, res, next) => {
-  try {
-    if (await Loan.exists({ member: req.params.id, status: 'Issued' })) return res.status(400).json({ message: 'Cannot delete a member with an active book issue.' });
-    const member = await Member.findByIdAndDelete(req.params.id);
-    if (!member) return res.status(404).json({ message: 'Member not found.' });
-    res.json({ message: 'Member deleted.' });
-  } catch (e) { next(e); }
-});
+import { readDB, updateDB, newId, now, byNewest } from '../storage/db.js';
+const router=Router(); const valid=m=>m.name?.trim()&&/^\S+@\S+\.\S+$/.test(m.email||'')&&m.phone?.trim();
+router.get('/',async(req,res,next)=>{try{const db=await readDB(),q=(req.query.search||'').trim().toLowerCase();res.json(byNewest(db.members.filter(m=>!q||[m.name,m.email,m.phone,m.department].join(' ').toLowerCase().includes(q))));}catch(e){next(e);}});
+router.post('/',async(req,res,next)=>{try{const m=req.body;if(!valid(m))return res.status(400).json({message:'Enter a name, valid email and phone number.'});const member={_id:newId(),name:m.name.trim(),email:m.email.trim().toLowerCase(),phone:m.phone.trim(),department:(m.department||'').trim(),createdAt:now()};const result=await updateDB(db=>{if(db.members.some(x=>x.email===member.email))return null;db.members.push(member);return member;});if(!result)return res.status(409).json({message:'A member with this email already exists.'});res.status(201).json(result);}catch(e){next(e);}});
+router.put('/:id',async(req,res,next)=>{try{const m=req.body;if(!valid(m))return res.status(400).json({message:'Enter a name, valid email and phone number.'});const result=await updateDB(db=>{const member=db.members.find(x=>x._id===req.params.id);if(!member)return {error:404,message:'Member not found.'};const email=m.email.trim().toLowerCase();if(db.members.some(x=>x._id!==member._id&&x.email===email))return {error:409,message:'A member with this email already exists.'};Object.assign(member,{name:m.name.trim(),email,phone:m.phone.trim(),department:(m.department||'').trim()});return {member};});if(result.error)return res.status(result.error).json({message:result.message});res.json(result.member);}catch(e){next(e);}});
+router.delete('/:id',async(req,res,next)=>{try{const result=await updateDB(db=>{if(db.loans.some(l=>l.member===req.params.id&&l.status==='Issued'))return {error:400,message:'Cannot delete a member with an active book issue.'};const i=db.members.findIndex(m=>m._id===req.params.id);if(i<0)return {error:404,message:'Member not found.'};db.members.splice(i,1);return {ok:true};});if(result.error)return res.status(result.error).json({message:result.message});res.json({message:'Member deleted.'});}catch(e){next(e);}});
 export default router;

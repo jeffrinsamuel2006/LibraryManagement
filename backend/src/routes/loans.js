@@ -1,36 +1,8 @@
 import { Router } from 'express';
-import Loan from '../models/Loan.js';
-import Book from '../models/Book.js';
-import Member from '../models/Member.js';
-const router = Router();
-router.get('/', async (_req, res, next) => {
-  try {
-    const loans = await Loan.find().populate('book', 'title author isbn').populate('member', 'name email').sort({ createdAt: -1 });
-    res.json(loans);
-  } catch (e) { next(e); }
-});
-router.post('/', async (req, res, next) => {
-  try {
-    const { bookId, memberId, dueDate } = req.body;
-    if (!bookId || !memberId || !dueDate || new Date(dueDate) <= new Date()) return res.status(400).json({ message: 'Choose a book, member and a future due date.' });
-    const [book, member] = await Promise.all([Book.findById(bookId), Member.findById(memberId)]);
-    if (!book || !member) return res.status(404).json({ message: 'Selected book or member was not found.' });
-    if (book.availableCopies < 1) return res.status(400).json({ message: 'No copies of this book are currently available.' });
-    book.availableCopies -= 1;
-    await book.save();
-    const loan = await Loan.create({ book: book._id, member: member._id, dueDate: new Date(dueDate) });
-    res.status(201).json(await loan.populate([{ path: 'book', select: 'title author isbn' }, { path: 'member', select: 'name email' }]));
-  } catch (e) { next(e); }
-});
-router.patch('/:id/return', async (req, res, next) => {
-  try {
-    const loan = await Loan.findById(req.params.id);
-    if (!loan) return res.status(404).json({ message: 'Issue record not found.' });
-    if (loan.status === 'Returned') return res.status(400).json({ message: 'This book has already been returned.' });
-    loan.status = 'Returned'; loan.returnDate = new Date();
-    await loan.save();
-    await Book.findByIdAndUpdate(loan.book, { $inc: { availableCopies: 1 } });
-    res.json(await loan.populate([{ path: 'book', select: 'title author isbn' }, { path: 'member', select: 'name email' }]));
-  } catch (e) { next(e); }
-});
+import { readDB, updateDB, newId, now, byNewest } from '../storage/db.js';
+const router=Router();
+function present(loan,db){const book=db.books.find(b=>b._id===loan.book),member=db.members.find(m=>m._id===loan.member);return {...loan,book:book?{_id:book._id,title:book.title,author:book.author,isbn:book.isbn}:null,member:member?{_id:member._id,name:member.name,email:member.email}:null};}
+router.get('/',async(_req,res,next)=>{try{const db=await readDB();res.json(byNewest(db.loans).map(l=>present(l,db)));}catch(e){next(e);}});
+router.post('/',async(req,res,next)=>{try{const {bookId,memberId,dueDate}=req.body;if(!bookId||!memberId||!dueDate||!Number.isFinite(new Date(dueDate).getTime())||new Date(dueDate)<=new Date())return res.status(400).json({message:'Choose a book, member and a future due date.'});const result=await updateDB(db=>{const book=db.books.find(b=>b._id===bookId),member=db.members.find(m=>m._id===memberId);if(!book||!member)return {error:404,message:'Selected book or member was not found.'};if(book.availableCopies<1)return {error:400,message:'No copies of this book are currently available.'};book.availableCopies-=1;const loan={_id:newId(),book:bookId,member:memberId,issueDate:now(),dueDate:new Date(dueDate).toISOString(),returnDate:null,status:'Issued',createdAt:now()};db.loans.push(loan);return {loan,db};});if(result.error)return res.status(result.error).json({message:result.message});res.status(201).json(present(result.loan,result.db));}catch(e){next(e);}});
+router.patch('/:id/return',async(req,res,next)=>{try{const result=await updateDB(db=>{const loan=db.loans.find(l=>l._id===req.params.id);if(!loan)return {error:404,message:'Issue record not found.'};if(loan.status==='Returned')return {error:400,message:'This book has already been returned.'};loan.status='Returned';loan.returnDate=now();const book=db.books.find(b=>b._id===loan.book);if(book)book.availableCopies=Math.min(book.totalCopies,book.availableCopies+1);return {loan,db};});if(result.error)return res.status(result.error).json({message:result.message});res.json(present(result.loan,result.db));}catch(e){next(e);}});
 export default router;
